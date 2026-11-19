@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -31,6 +32,7 @@ WEBSITE_URL = "https://Yourgirlkatrina.com"
 MENTION_HANDLE = "hotgirlkatrina.bsky.social"
 
 CAPTION_TITLE = "🌸 𝐊𝐀𝐓𝐑𝐈𝐍𝐀 🌸"
+
 ALT_TEXT = (
     "🧡🖤 Photo from Katrina's #redhead collection. "
     "Exclusive content on #OnlyFans #OF"
@@ -41,8 +43,10 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
 
 MAX_IMAGE_DIMENSION = 2400
 MAX_IMAGE_SIZE = 1_900_000
+
 MAX_VIDEO_SIZE = 95_000_000
 MAX_VIDEO_SECONDS = 180
+MAX_VIDEO_DIMENSION = 1920
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -53,7 +57,7 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 # ============================================================
 
 def connect_drive():
-    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
     if not raw:
         raise RuntimeError(
@@ -65,7 +69,12 @@ def connect_drive():
         scopes=SCOPES
     )
 
-    return build("drive", "v3", credentials=credentials)
+    return build(
+        "drive",
+        "v3",
+        credentials=credentials,
+        cache_discovery=False
+    )
 
 
 def get_folder(service, folder_id):
@@ -104,7 +113,10 @@ def list_children(service, folder_id):
 
 def find_or_create_folder(service, name, parent_id):
     for item in list_children(service, parent_id):
-        if item["mimeType"] == FOLDER_MIME and item["name"] == name:
+        if (
+            item["mimeType"] == FOLDER_MIME
+            and item["name"] == name
+        ):
             return item["id"]
 
     folder = service.files().create(
@@ -137,12 +149,14 @@ def ensure_hotties_structure(service, categories):
     category_destinations = {}
 
     for category in categories:
-        category_destinations[category["name"]] = {
+        category_name = category["name"]
+
+        category_destinations[category_name] = {
             "ready": find_or_create_folder(
-                service, category["name"], hotties_ready_id
+                service, category_name, hotties_ready_id
             ),
             "used": find_or_create_folder(
-                service, category["name"], hotties_used_id
+                service, category_name, hotties_used_id
             )
         }
 
@@ -197,7 +211,7 @@ def save_drive_properties(service, file_id, properties):
 # ============================================================
 
 def connect_bluesky():
-    password = os.environ.get(PASSWORD_SECRET)
+    password = os.environ.get(PASSWORD_SECRET, "").strip()
 
     if not password:
         raise RuntimeError(
@@ -229,8 +243,6 @@ def build_caption(client):
 
     builder.text("\n\n")
 
-    # De zichtbare tekst bevat geen https://
-    # De link verwijst wel naar de volledige website-URL.
     builder.link(
         "❤️ Yourgirlkatrina.com ❤️",
         WEBSITE_URL
@@ -269,16 +281,14 @@ def get_media_candidates(service, categories):
             if file_info["mimeType"] == FOLDER_MIME:
                 continue
 
-            extension = os.path.splitext(
-                file_info["name"].lower()
-            )[1]
+            extension = Path(file_info["name"]).suffix.lower()
 
             if extension not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS:
                 continue
 
-            properties = file_info.get("appProperties", {})
+            properties = file_info.get("appProperties") or {}
 
-            # Voorkom dat hetzelfde Drive-bestand opnieuw wordt geplaatst.
+            # Voorkom dubbele publicaties.
             if properties.get("redhead_posted_at"):
                 continue
 
@@ -293,27 +303,26 @@ def get_media_candidates(service, categories):
 
 # ============================================================
 # IMAGE PREPARATION
-# Geen balken, geen onnodige uitsnede.
+# Geen balken en geen onnodige uitsnede.
 # Originele beeldverhouding blijft behouden.
 # ============================================================
 
 def prepare_image(data):
-    image = Image.open(io.BytesIO(data))
+    with Image.open(io.BytesIO(data)) as opened_image:
+        image = ImageOps.exif_transpose(opened_image)
+        image.load()
 
-    # Corrigeert foto's die via EXIF gedraaid moeten worden.
-    image = ImageOps.exif_transpose(image)
-    image.load()
+        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, "white")
+            background.paste(
+                rgba,
+                mask=rgba.getchannel("A")
+            )
+            image = background
+        else:
+            image = image.convert("RGB")
 
-    # Transparante afbeeldingen krijgen een witte achtergrond.
-    if image.mode in ("RGBA", "LA") or "transparency" in image.info:
-        rgba = image.convert("RGBA")
-        background = Image.new("RGB", rgba.size, "white")
-        background.paste(rgba, mask=rgba.getchannel("A"))
-        image = background
-    else:
-        image = image.convert("RGB")
-
-    # Verkleinen zonder de oorspronkelijke verhoudingen te veranderen.
     image.thumbnail(
         (MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION),
         Image.Resampling.LANCZOS
@@ -334,48 +343,48 @@ def prepare_image(data):
         result = output.getvalue()
 
         if len(result) <= MAX_IMAGE_SIZE:
-            return result
-
-        quality -= 5
-
-        if quality < 45:
-            image.thumbnail(
-                (1600, 1600),
-                Image.Resampling.LANCZOS
+            print(
+                f"✅ Image prepared: {image.width}x{image.height}, "
+                f"{len(result)} bytes"
             )
-            quality = 75
+            return result, image.width, image.height
 
-            output = io.BytesIO()
-            image.save(
-                output,
-                format="JPEG",
-                quality=quality,
-                optimize=True
-            )
+        if quality > 50:
+            quality -= 5
+            continue
 
-            result = output.getvalue()
+        width, height = image.size
 
-            if len(result) <= MAX_IMAGE_SIZE:
-                return result
-
+        if max(width, height) <= 600:
             raise RuntimeError(
                 "Image could not be compressed below 1.9 MB."
             )
 
+        image.thumbnail(
+            (
+                max(1, int(width * 0.85)),
+                max(1, int(height * 0.85))
+            ),
+            Image.Resampling.LANCZOS
+        )
+
+        quality = 82
+
 
 # ============================================================
 # VIDEO PREPARATION
-# FFmpeg wordt alleen gebruikt als een video geselecteerd is.
+# H.264 / AAC MP4 voor Bluesky.
+# Behoudt beeldverhouding en snijdt niets uit.
 # ============================================================
 
 def ensure_ffmpeg():
-    if shutil.which("ffmpeg"):
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
         return
 
     print("📦 Installing FFmpeg...")
 
     subprocess.run(
-        ["sudo", "apt-get", "update", "-y"],
+        ["sudo", "apt-get", "update"],
         check=True
     )
 
@@ -384,33 +393,88 @@ def ensure_ffmpeg():
         check=True
     )
 
-    if not shutil.which("ffmpeg"):
-        raise RuntimeError("FFmpeg installation failed.")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise RuntimeError(
+            "FFmpeg or FFprobe installation failed."
+        )
+
+
+def get_video_duration(input_path):
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            input_path
+        ],
+        check=True,
+        capture_output=True,
+        text=True
+    )
+
+    try:
+        return float(result.stdout.strip())
+    except (ValueError, TypeError):
+        raise RuntimeError(
+            "Could not determine video duration."
+        )
 
 
 def prepare_video(data, filename):
     ensure_ffmpeg()
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        input_path = os.path.join(temp_dir, filename)
-        output_path = os.path.join(temp_dir, "katrina_ready.mp4")
+        safe_name = Path(filename).name
+        extension = Path(safe_name).suffix.lower() or ".mov"
+
+        input_path = os.path.join(
+            temp_dir,
+            "katrina_original" + extension
+        )
+
+        output_path = os.path.join(
+            temp_dir,
+            "katrina_ready.mp4"
+        )
 
         with open(input_path, "wb") as file:
             file.write(data)
+
+        duration = get_video_duration(input_path)
+
+        print(f"⏱️ Original video duration: {duration:.1f} seconds")
+
+        if duration <= 0:
+            raise RuntimeError("Invalid video duration.")
+
+        if duration > MAX_VIDEO_SECONDS:
+            raise RuntimeError(
+                f"Video is {duration:.1f} seconds. "
+                f"Maximum allowed is {MAX_VIDEO_SECONDS} seconds. "
+                "Original Drive file has not been moved."
+            )
+
+        # Gebruik een schaalfilter met behoud van de volledige
+        # beeldverhouding. Geen crop en geen zwarte balken.
+        scale_filter = (
+            "scale="
+            "w='min(1920,iw)':"
+            "h='min(1920,ih)':"
+            "force_original_aspect_ratio=decrease:"
+            "force_divisible_by=2"
+        )
 
         command = [
             "ffmpeg",
             "-y",
             "-i", input_path,
+            "-map", "0:v:0",
+            "-map", "0:a?",
             "-t", str(MAX_VIDEO_SECONDS),
-            "-vf",
-            (
-                "scale="
-                "if(gt(iw,ih),min(1920,iw),-2):"
-                "if(gt(iw,ih),-2,min(1920,ih))"
-            ),
+            "-vf", scale_filter,
             "-c:v", "libx264",
-            "-preset", "medium",
+            "-preset", "veryfast",
             "-crf", "23",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
@@ -421,22 +485,47 @@ def prepare_video(data, filename):
         ]
 
         print("🎬 Converting video for Bluesky...")
+        print("📐 Preserving original aspect ratio...")
 
-        subprocess.run(
+        result = subprocess.run(
             command,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            capture_output=True,
+            text=True
         )
+
+        if result.returncode != 0:
+            print("❌ FFmpeg conversion failed.")
+            print("----- FFmpeg error output -----")
+            print(result.stderr[-12000:])
+            print("----- End FFmpeg error output -----")
+
+            raise RuntimeError(
+                f"FFmpeg conversion failed with exit code "
+                f"{result.returncode}."
+            )
+
+        if not os.path.exists(output_path):
+            raise RuntimeError(
+                "FFmpeg did not create the output MP4."
+            )
 
         with open(output_path, "rb") as file:
             video_data = file.read()
 
+    if not video_data:
+        raise RuntimeError("Converted video is empty.")
+
     if len(video_data) > MAX_VIDEO_SIZE:
         raise RuntimeError(
-            "Converted video is larger than 95 MB. "
+            f"Converted video is {len(video_data)} bytes, "
+            "larger than the 95 MB limit. "
             "Original Drive file has not been moved."
         )
+
+    print(
+        f"✅ Video prepared: {len(video_data)} bytes "
+        f"({len(video_data) / 1024 / 1024:.2f} MB)"
+    )
 
     return video_data
 
@@ -445,13 +534,27 @@ def prepare_video(data, filename):
 # PUBLISHING
 # ============================================================
 
-def publish_image(client, media_data):
+def publish_image(client, media_data, width, height):
     caption = build_caption(client)
 
-    return client.send_image(
+    uploaded = client.upload_blob(media_data).blob
+
+    image = models.AppBskyEmbedImages.Image(
+        alt=ALT_TEXT,
+        image=uploaded,
+        aspect_ratio=models.AppBskyEmbedDefs.AspectRatio(
+            width=width,
+            height=height
+        )
+    )
+
+    embed = models.AppBskyEmbedImages.Main(
+        images=[image]
+    )
+
+    return client.send_post(
         text=caption,
-        image=media_data,
-        image_alt=ALT_TEXT
+        embed=embed
     )
 
 
@@ -460,11 +563,15 @@ def publish_video(client, video_data, filename):
 
     upload_response = client.upload_video(
         video=video_data,
-        video_name=os.path.splitext(filename)[0] + ".mp4",
+        video_name=Path(filename).stem + ".mp4",
         video_alt=ALT_TEXT
     )
 
-    video_blob = upload_response.blob
+    video_blob = getattr(
+        upload_response,
+        "blob",
+        upload_response
+    )
 
     embed = models.AppBskyEmbedVideo.Main(
         video=video_blob,
@@ -478,17 +585,27 @@ def publish_video(client, video_data, filename):
 
 
 def publish_media(client, media_data, filename):
-    extension = os.path.splitext(filename.lower())[1]
+    extension = Path(filename).suffix.lower()
 
     if extension in IMAGE_EXTENSIONS:
         print("🖼️ Preparing photo...")
-        image_data = prepare_image(media_data)
 
-        return publish_image(client, image_data)
+        image_data, width, height = prepare_image(media_data)
+
+        return publish_image(
+            client,
+            image_data,
+            width,
+            height
+        )
 
     if extension in VIDEO_EXTENSIONS:
         print("🎬 Preparing video...")
-        video_data = prepare_video(media_data, filename)
+
+        video_data = prepare_video(
+            media_data,
+            filename
+        )
 
         return publish_video(
             client,
@@ -496,7 +613,9 @@ def publish_media(client, media_data, filename):
             filename
         )
 
-    raise ValueError(f"Unsupported media: {filename}")
+    raise ValueError(
+        f"Unsupported media: {filename}"
+    )
 
 
 # ============================================================
@@ -513,7 +632,12 @@ def load_state():
 
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as file:
-        json.dump(state, file, indent=2)
+        json.dump(
+            state,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
 
 
 # ============================================================
@@ -551,7 +675,9 @@ def main():
     categories = get_categories(drive)
 
     if not categories:
-        raise RuntimeError("No category folders found in Katrina/Ready.")
+        raise RuntimeError(
+            "No category folders found in Katrina/Ready."
+        )
 
     print(f"📂 Found {len(categories)} categories.")
 
@@ -560,23 +686,32 @@ def main():
         categories
     )
 
-    candidates = get_media_candidates(drive, categories)
+    candidates = get_media_candidates(
+        drive,
+        categories
+    )
 
     if not candidates:
-        print("ℹ️ No new eligible photos or videos found.")
+        print(
+            "ℹ️ No new eligible photos or videos found."
+        )
         return
 
     state = load_state()
-    posted_ids = set(state.get("posted_file_ids", []))
 
-    # Extra controle via state file.
+    posted_ids = set(
+        state.get("posted_file_ids", [])
+    )
+
     candidates = [
         item for item in candidates
         if item["file"]["id"] not in posted_ids
     ]
 
     if not candidates:
-        print("ℹ️ No new eligible media remains.")
+        print(
+            "ℹ️ No new eligible media remains."
+        )
         return
 
     selected = random.choice(candidates)
@@ -590,24 +725,38 @@ def main():
     print(f"📁 Selected file: {filename}")
 
     print("⬇️ Downloading media...")
-    media_data = download_file(drive, file_id)
+
+    media_data = download_file(
+        drive,
+        file_id
+    )
+
+    print(
+        f"✅ Download complete: {len(media_data)} bytes"
+    )
 
     print("🔐 Connecting to Bluesky...")
     client = connect_bluesky()
 
     print("🚀 Publishing to RedheadHeaven...")
 
-    # Bij een fout stopt het script hier.
-    # Het bestand wordt dan NIET verplaatst.
+    # Als voorbereiding of publicatie mislukt, blijft het
+    # originele bestand in de oorspronkelijke Ready-map staan.
     response = publish_media(
         client,
         media_data,
         filename
     )
 
+    if not response or not getattr(response, "uri", None):
+        raise RuntimeError(
+            "Bluesky did not confirm the post. "
+            "Original Drive file has not been moved."
+        )
+
     posted_at = datetime.now(timezone.utc).isoformat()
 
-    # Bewaar publicatiegegevens in Google Drive.
+    # Publicatiegegevens opslaan in Google Drive.
     save_drive_properties(
         drive,
         file_id,
@@ -621,15 +770,20 @@ def main():
         }
     )
 
-    # Bewaar ook de lokale status.
-    state.setdefault("posted_file_ids", []).append(file_id)
+    # Lokale status bijwerken.
+    if file_id not in posted_ids:
+        state.setdefault(
+            "posted_file_ids",
+            []
+        ).append(file_id)
+
     state["last_posted_file"] = file_id
     state["last_post_uri"] = response.uri
     state["last_posted_at"] = posted_at
 
     save_state(state)
 
-    # Verplaats pas nadat Bluesky de publicatie bevestigd heeft.
+    # Alleen na bevestigde publicatie verplaatsen.
     destination_id = destinations[category_name]["ready"]
 
     move_file(
@@ -641,7 +795,9 @@ def main():
     print("=" * 60)
     print("✅ Katrina post successfully published.")
     print("✅ Google Drive metadata saved.")
-    print(f"📁 Moved to Hotties/Ready/{category_name}")
+    print(
+        f"📁 Moved to Hotties/Ready/{category_name}"
+    )
     print(f"🔗 {response.uri}")
     print("=" * 60)
 
