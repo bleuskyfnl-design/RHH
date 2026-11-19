@@ -1,10 +1,15 @@
+
 #!/usr/bin/env python3
 """
-RedFoxRHH - RedheadHeaven New Post
+RedFoxRHH - publish one random image/video from Google Drive to RedheadHeaven.
 
-Google Drive:
+Drive layout:
 Bleusky Photos / Redheadheaven / Redfox / Ready
 Bleusky Photos / Redheadheaven / Redfox / Used
+
+Required GitHub secrets:
+- RHH_PASSWORD
+- GOOGLE_SERVICE_ACCOUNT_JSON
 """
 
 import io
@@ -14,22 +19,18 @@ import random
 import subprocess
 import tempfile
 from pathlib import Path
-from shutil import which
 
 from atproto import Client, models
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
-from PIL import Image, ImageOps
+from PIL import Image
 
-# --------------------------------------------------
-# SETTINGS
-# --------------------------------------------------
+# -------------------- SETTINGS --------------------
 
 BLUESKY_HANDLE = "redheadheaven.bsky.social"
 BLUESKY_PASSWORD = os.getenv("RHH_PASSWORD", "").strip()
 
-# Google Drive folder ID
 REDHEADHEAVEN_FOLDER_ID = "1io9JflAesjxaTXtCSZbQJeY-UUfmF-yb"
 
 CAPTION = (
@@ -37,9 +38,13 @@ CAPTION = (
     "🦊 https://onlyfans.com/redfoxofficial 🦊"
 )
 
+ALT_TEXT = (
+    "🧡🖤 RedFoxOfficial the beautiful #redhead. "
+    "Spicy content on #OnlyFans #OF"
+)
+
 MAX_IMAGE_BYTES = 1_900_000
 MAX_IMAGE_DIMENSION = 2400
-
 MAX_VIDEO_SECONDS = 180
 MAX_VIDEO_BYTES = 95 * 1024 * 1024
 
@@ -48,9 +53,8 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
-# --------------------------------------------------
-# GOOGLE DRIVE
-# --------------------------------------------------
+
+# -------------------- GOOGLE DRIVE --------------------
 
 def drive_client():
     raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
@@ -62,7 +66,7 @@ def drive_client():
 
     info = json.loads(raw)
 
-    credentials = service_account.Credentials.from_service_account_info(
+    creds = service_account.Credentials.from_service_account_info(
         info,
         scopes=DRIVE_SCOPES
     )
@@ -70,7 +74,7 @@ def drive_client():
     return build(
         "drive",
         "v3",
-        credentials=credentials,
+        credentials=creds,
         cache_discovery=False
     )
 
@@ -79,7 +83,7 @@ def get_folder_metadata(drive, folder_id):
     return drive.files().get(
         fileId=folder_id,
         fields="id,name,mimeType",
-        supportsAllDrives=True
+        supportsAllDrives=True,
     ).execute()
 
 
@@ -96,7 +100,7 @@ def find_child_folder(drive, parent_id, folder_name):
         fields="files(id,name)",
         pageSize=100,
         supportsAllDrives=True,
-        includeItemsFromAllDrives=True
+        includeItemsFromAllDrives=True,
     ).execute()
 
     folders = result.get("files", [])
@@ -105,8 +109,9 @@ def find_child_folder(drive, parent_id, folder_name):
         parent = get_folder_metadata(drive, parent_id)
 
         raise RuntimeError(
-            f"Map '{folder_name}' niet gevonden in "
-            f"'{parent.get('name')}'."
+            f"Google Drive-map '{folder_name}' niet gevonden "
+            f"in '{parent.get('name')}'. Controleer de map-ID "
+            "en of de service account toegang heeft."
         )
 
     return folders[0]["id"]
@@ -121,11 +126,14 @@ def resolve_redfox_folder(drive):
     folder_name = configured.get("name", "")
 
     if folder_name.lower() == "redfox":
-        print("Redfox-map rechtstreeks gevonden.")
+        print("Drive-map-ID verwijst rechtstreeks naar Redfox.")
         return REDHEADHEAVEN_FOLDER_ID
 
     if folder_name.lower() == "redheadheaven":
-        print("Redheadheaven gevonden.")
+        print(
+            "Redheadheaven-map gevonden; "
+            "Redfox wordt daaronder gezocht."
+        )
 
         return find_child_folder(
             drive,
@@ -134,7 +142,10 @@ def resolve_redfox_folder(drive):
         )
 
     if folder_name.lower() == "bleusky photos":
-        print("Bleusky Photos gevonden.")
+        print(
+            "Bleusky Photos-map gevonden; "
+            "Redheadheaven/Redfox wordt daaronder gezocht."
+        )
 
         redheadheaven_id = find_child_folder(
             drive,
@@ -157,22 +168,23 @@ def resolve_redfox_folder(drive):
 
 def list_ready_files(drive, ready_id):
     query = (
-        f"'{ready_id}' in parents "
-        "and trashed = false"
+        f"'{ready_id}' in parents and trashed = false"
     )
 
     result = drive.files().list(
         q=query,
         fields="files(id,name,mimeType,size)",
         pageSize=1000,
+        orderBy="name",
         supportsAllDrives=True,
-        includeItemsFromAllDrives=True
+        includeItemsFromAllDrives=True,
     ).execute()
 
     allowed = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
     return [
-        item for item in result.get("files", [])
+        item
+        for item in result.get("files", [])
         if Path(item["name"]).suffix.lower() in allowed
     ]
 
@@ -201,28 +213,24 @@ def move_to_used(drive, file_id, ready_id, used_id):
         addParents=used_id,
         removeParents=ready_id,
         supportsAllDrives=True,
-        fields="id,parents"
+        fields="id,parents",
     ).execute()
 
 
-# --------------------------------------------------
-# IMAGE PROCESSING - PILLOW
-# --------------------------------------------------
+# -------------------- MEDIA PREPARATION --------------------
 
 def prepare_image(source_path):
     image = Image.open(source_path)
 
-    # Correct camera orientation
+    # Correct orientation from phone/camera metadata.
+    from PIL import ImageOps
     image = ImageOps.exif_transpose(image)
 
-    # Convert to RGB for JPEG upload
     if image.mode != "RGB":
         image = image.convert("RGB")
 
-    # Keep original aspect ratio
     image.thumbnail(
-        (MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION),
-        Image.Resampling.LANCZOS
+        (MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION)
     )
 
     quality = 90
@@ -244,16 +252,11 @@ def prepare_image(source_path):
 
         if quality > 55:
             quality -= 7
-
         else:
-            new_width = max(500, int(image.width * 0.85))
-            new_height = max(500, int(image.height * 0.85))
-
-            image.thumbnail(
-                (new_width, new_height),
-                Image.Resampling.LANCZOS
-            )
-
+            image.thumbnail((
+                max(500, int(image.width * 0.85)),
+                max(500, int(image.height * 0.85))
+            ))
             quality = 82
 
         if (
@@ -262,20 +265,49 @@ def prepare_image(source_path):
             and len(data) > MAX_IMAGE_BYTES
         ):
             raise RuntimeError(
-                "Afbeelding kan niet onder de uploadlimiet worden gebracht."
+                "Afbeelding kan niet onder de uploadlimiet "
+                "worden gebracht."
             )
 
 
-# --------------------------------------------------
-# VIDEO PROCESSING - FFMPEG
-# --------------------------------------------------
+def shutil_which(program):
+    from shutil import which
+    return which(program)
+
+
+def ensure_ffmpeg():
+    # FFmpeg wordt alleen geïnstalleerd als er een video is geselecteerd.
+    if shutil_which("ffmpeg") and shutil_which("ffprobe"):
+        return
+
+    print(
+        "Video geselecteerd: FFmpeg wordt nu geïnstalleerd..."
+    )
+
+    subprocess.run(
+        ["sudo", "apt-get", "update"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    subprocess.run(
+        ["sudo", "apt-get", "install", "-y", "ffmpeg"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if not shutil_which("ffmpeg") or not shutil_which("ffprobe"):
+        raise RuntimeError(
+            "FFmpeg/FFprobe kon niet worden geïnstalleerd."
+        )
+
 
 def prepare_video(source_path):
-    if not which("ffmpeg") or not which("ffprobe"):
-        raise RuntimeError("FFmpeg/FFprobe ontbreekt.")
+    ensure_ffmpeg()
 
     with tempfile.TemporaryDirectory() as temp_dir:
-
         output_path = str(
             Path(temp_dir) / "ready.mp4"
         )
@@ -285,20 +317,23 @@ def prepare_video(source_path):
                 "ffprobe",
                 "-v", "error",
                 "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                source_path
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                source_path,
             ],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
 
-        duration = float(probe.stdout.strip() or "0")
+        duration = float(
+            probe.stdout.strip() or "0"
+        )
 
         if duration <= 0 or duration > MAX_VIDEO_SECONDS:
             raise RuntimeError(
-                f"Video duurt {duration:.1f}s. "
-                f"Maximum is {MAX_VIDEO_SECONDS}s."
+                f"Video duurt {duration:.1f}s; "
+                f"maximum is {MAX_VIDEO_SECONDS}s."
             )
 
         subprocess.run(
@@ -316,24 +351,22 @@ def prepare_video(source_path):
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-movflags", "+faststart",
-                output_path
+                output_path,
             ],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
 
         if os.path.getsize(output_path) > MAX_VIDEO_BYTES:
             raise RuntimeError(
-                "Video is groter dan de uploadlimiet."
+                "Video is groter dan de ingestelde uploadlimiet."
             )
 
         return Path(output_path).read_bytes()
 
 
-# --------------------------------------------------
-# BLUESKY FACETS
-# --------------------------------------------------
+# -------------------- BLUESKY FACETS / POST --------------------
 
 def build_facets(text, client):
     facets = []
@@ -341,9 +374,9 @@ def build_facets(text, client):
     mention = "@redfoxofficial.bsky.social"
     mention_start = text.index(mention)
 
-    did = client.com.atproto.identity.resolve_handle(
-        {"handle": "redfoxofficial.bsky.social"}
-    ).did
+    did = client.com.atproto.identity.resolve_handle({
+        "handle": "redfoxofficial.bsky.social"
+    }).did
 
     facets.append(
         models.AppBskyRichtextFacet.Main(
@@ -353,13 +386,13 @@ def build_facets(text, client):
                 ),
                 byte_end=len(
                     text[:mention_start + len(mention)].encode("utf-8")
-                )
+                ),
             ),
             features=[
                 models.AppBskyRichtextFacet.Mention(
                     did=did
                 )
-            ]
+            ],
         )
     )
 
@@ -374,26 +407,23 @@ def build_facets(text, client):
                 ),
                 byte_end=len(
                     text[:link_start + len(link)].encode("utf-8")
-                )
+                ),
             ),
             features=[
                 models.AppBskyRichtextFacet.Link(
                     uri=link
                 )
-            ]
+            ],
         )
     )
 
     return facets
 
 
-# --------------------------------------------------
-# BLUESKY PUBLISHING
-# --------------------------------------------------
-
 def publish_image(
     client,
     image_bytes,
+    filename,
     facets,
     width,
     height
@@ -401,12 +431,12 @@ def publish_image(
     blob = client.upload_blob(image_bytes).blob
 
     image = models.AppBskyEmbedImages.Image(
-        alt="RedFox",
+        alt=ALT_TEXT,
         image=blob,
         aspect_ratio=models.AppBskyEmbedDefs.AspectRatio(
             width=width,
-            height=height
-        )
+            height=height,
+        ),
     )
 
     embed = models.AppBskyEmbedImages.Main(
@@ -420,11 +450,16 @@ def publish_image(
     )
 
 
-def publish_video(client, video_bytes, filename, facets):
+def publish_video(
+    client,
+    video_bytes,
+    filename,
+    facets
+):
     upload_result = client.upload_video(
         video=video_bytes,
         video_name=filename,
-        video_alt="RedFox"
+        video_alt=ALT_TEXT,
     )
 
     video_blob = getattr(
@@ -435,7 +470,7 @@ def publish_video(client, video_bytes, filename, facets):
 
     embed = models.AppBskyEmbedVideo.Main(
         video=video_blob,
-        alt="RedFox"
+        alt=ALT_TEXT
     )
 
     return client.send_post(
@@ -445,12 +480,9 @@ def publish_video(client, video_bytes, filename, facets):
     )
 
 
-# --------------------------------------------------
-# MAIN
-# --------------------------------------------------
+# -------------------- MAIN --------------------
 
 def main():
-
     if not BLUESKY_PASSWORD:
         raise RuntimeError(
             "GitHub Secret RHH_PASSWORD ontbreekt."
@@ -458,6 +490,7 @@ def main():
 
     drive = drive_client()
 
+    # RedheadHeaven / Redfox / Ready and Used
     redfox_id = resolve_redfox_folder(drive)
 
     ready_id = find_child_folder(
@@ -478,7 +511,10 @@ def main():
     )
 
     if not candidates:
-        print("Geen geschikte foto of video in Ready.")
+        print(
+            "Geen geschikte foto of video gevonden "
+            "in Redfox/Ready."
+        )
         return
 
     selected = random.choice(candidates)
@@ -486,7 +522,9 @@ def main():
     filename = selected["name"]
     extension = Path(filename).suffix.lower()
 
-    print(f"Geselecteerd bestand: {filename}")
+    print(
+        f"Geselecteerd bestand: {filename}"
+    )
 
     client = Client()
 
@@ -501,7 +539,6 @@ def main():
     )
 
     with tempfile.TemporaryDirectory() as temp_dir:
-
         local_path = str(
             Path(temp_dir) / filename
         )
@@ -513,28 +550,26 @@ def main():
         )
 
         if extension in IMAGE_EXTENSIONS:
-
-            media, width, height = prepare_image(
+            media, image_width, image_height = prepare_image(
                 local_path
             )
 
             print(
-                f"Foto aangepast: {width}x{height} pixels"
+                f"Afbeeldingsformaat: "
+                f"{image_width}x{image_height}"
             )
 
             publish_image(
                 client,
                 media,
+                filename,
                 facets,
-                width,
-                height
+                image_width,
+                image_height
             )
 
         elif extension in VIDEO_EXTENSIONS:
-
-            media = prepare_video(
-                local_path
-            )
+            media = prepare_video(local_path)
 
             publish_video(
                 client,
@@ -548,7 +583,7 @@ def main():
                 f"Niet-ondersteund bestandstype: {extension}"
             )
 
-    # Move only after successful Bluesky publication
+    # Alleen verplaatsen nadat Bluesky de post heeft aangemaakt.
     move_to_used(
         drive,
         selected["id"],
@@ -557,7 +592,8 @@ def main():
     )
 
     print(
-        f"Succesvol gepubliceerd en verplaatst naar Used: {filename}"
+        f"Succesvol geplaatst en verplaatst naar Used: "
+        f"{filename}"
     )
 
 
