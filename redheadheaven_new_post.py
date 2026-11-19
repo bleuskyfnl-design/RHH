@@ -22,7 +22,7 @@ DRIVE_ROOT_ID = os.getenv(
 )
 
 # Exact Google Drive folder names, including capitalization and spacing.
-ACCOUNT_FOLDER = "redhead heaven"
+ACCOUNT_FOLDER = "redheadheaven"
 READY_FOLDER = "ready"
 USED_FOLDER = "used"
 FAILED_FOLDER = "failed"
