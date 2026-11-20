@@ -375,6 +375,12 @@ def prepare_image(data):
 # VIDEO PREPARATION
 # H.264 / AAC MP4 voor Bluesky.
 # Behoudt beeldverhouding en snijdt niets uit.
+#
+# FIX:
+# - Alleen eerste videostream gebruiken.
+# - Alleen eerste audiostream gebruiken.
+# - Apple APAC en overige extra streams overslaan.
+# - Geen onnodige data-, subtitle- of metadata-streams.
 # ============================================================
 
 def ensure_ffmpeg():
@@ -455,8 +461,8 @@ def prepare_video(data, filename):
                 "Original Drive file has not been moved."
             )
 
-        # Gebruik een schaalfilter met behoud van de volledige
-        # beeldverhouding. Geen crop en geen zwarte balken.
+        # Behoud volledige beeldverhouding.
+        # Geen crop, geen zwarte balken.
         scale_filter = (
             "scale="
             "w='min(1920,iw)':"
@@ -468,24 +474,49 @@ def prepare_video(data, filename):
         command = [
             "ffmpeg",
             "-y",
+
+            # Input
+            "-analyzeduration", "100M",
+            "-probesize", "100M",
             "-i", input_path,
+
+            # Alleen de eerste videostream.
             "-map", "0:v:0",
-            "-map", "0:a?",
+
+            # Alleen de eerste audiostream (optioneel).
+            # Hierdoor wordt Apple APAC niet geselecteerd.
+            "-map", "0:a:0?",
+
+            # Onbekende streams negeren.
+            "-ignore_unknown",
+
+            # Video-instellingen
             "-t", str(MAX_VIDEO_SECONDS),
             "-vf", scale_filter,
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", "23",
             "-pix_fmt", "yuv420p",
+
+            # Audio-instellingen
             "-c:a", "aac",
             "-b:a", "128k",
+            "-ac", "2",
+
+            # MP4-optimalisatie
             "-movflags", "+faststart",
+
+            # Geen ondertiteling of data.
             "-sn",
+            "-dn",
+
             output_path
         ]
 
         print("🎬 Converting video for Bluesky...")
         print("📐 Preserving original aspect ratio...")
+        print("🔊 Selecting first audio stream only...")
+        print("🛡️ Ignoring unsupported Apple audio/data streams...")
 
         result = subprocess.run(
             command,
@@ -507,6 +538,11 @@ def prepare_video(data, filename):
         if not os.path.exists(output_path):
             raise RuntimeError(
                 "FFmpeg did not create the output MP4."
+            )
+
+        if os.path.getsize(output_path) <= 0:
+            raise RuntimeError(
+                "FFmpeg created an empty output MP4."
             )
 
         with open(output_path, "rb") as file:
@@ -740,8 +776,7 @@ def main():
 
     print("🚀 Publishing to RedheadHeaven...")
 
-    # Als voorbereiding of publicatie mislukt, blijft het
-    # originele bestand in de oorspronkelijke Ready-map staan.
+    # Bij een fout blijft het originele bestand in Ready staan.
     response = publish_media(
         client,
         media_data,
@@ -770,37 +805,4 @@ def main():
         }
     )
 
-    # Lokale status bijwerken.
-    if file_id not in posted_ids:
-        state.setdefault(
-            "posted_file_ids",
-            []
-        ).append(file_id)
-
-    state["last_posted_file"] = file_id
-    state["last_post_uri"] = response.uri
-    state["last_posted_at"] = posted_at
-
-    save_state(state)
-
-    # Alleen na bevestigde publicatie verplaatsen.
-    destination_id = destinations[category_name]["ready"]
-
-    move_file(
-        drive,
-        file_id,
-        destination_id
-    )
-
-    print("=" * 60)
-    print("✅ Katrina post successfully published.")
-    print("✅ Google Drive metadata saved.")
-    print(
-        f"📁 Moved to Hotties/Ready/{category_name}"
-    )
-    print(f"🔗 {response.uri}")
-    print("=" * 60)
-
-
-if __name__ == "__main__":
-    main()
+    #
