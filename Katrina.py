@@ -210,6 +210,7 @@ def save_drive_properties(service, file_id, properties):
 # BLUESKY LOGIN
 # ============================================================
 
+
 def connect_bluesky():
     password = os.environ.get(PASSWORD_SECRET, "").strip()
 
@@ -220,20 +221,19 @@ def connect_bluesky():
 
     client = Client()
 
-import atproto
-print("ATPROTO VERSION:",               atproto.__version__)
-print("CLIENT TYPE:", type(client))
-print("UPLOAD VIDEO AVAILABLE:", hasattr(client, "upload_video"))
+    import atproto
+    print("ATPROTO VERSION:", atproto.__version__)
+    print("CLIENT TYPE:", type(client))
+    print(
+        "UPLOAD VIDEO AVAILABLE:",
+        hasattr(client, "upload_video")
+    )
 
-client.login(TARGET_ACCOUNT, password) = Client()
-
-    
+    client.login(TARGET_ACCOUNT, password)
 
     print(f"✅ Logged in as {TARGET_ACCOUNT}")
     return client
-
-
-# ============================================================
+ ============================================================
 # CAPTION AND CLICKABLE LINKS
 # ============================================================
 
