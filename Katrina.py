@@ -805,4 +805,37 @@ def main():
         }
     )
 
-    #
+    # Lokale status bijwerken.
+    if file_id not in posted_ids:
+        state.setdefault(
+            "posted_file_ids",
+            []
+        ).append(file_id)
+
+    state["last_posted_file"] = file_id
+    state["last_post_uri"] = response.uri
+    state["last_posted_at"] = posted_at
+
+    save_state(state)
+
+    # Alleen na bevestigde publicatie verplaatsen.
+    destination_id = destinations[category_name]["ready"]
+
+    move_file(
+        drive,
+        file_id,
+        destination_id
+    )
+
+    print("=" * 60)
+    print("✅ Katrina post successfully published.")
+    print("✅ Google Drive metadata saved.")
+    print(
+        f"📁 Moved to Hotties/Ready/{category_name}"
+    )
+    print(f"🔗 {response.uri}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
