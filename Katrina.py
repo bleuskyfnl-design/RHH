@@ -219,7 +219,15 @@ def connect_bluesky():
         )
 
     client = Client()
-    client.login(TARGET_ACCOUNT, password)
+
+import atproto
+print("ATPROTO VERSION:",               atproto.__version__)
+print("CLIENT TYPE:", type(client))
+print("UPLOAD VIDEO AVAILABLE:", hasattr(client, "upload_video"))
+
+client.login(TARGET_ACCOUNT, password) = Client()
+
+    
 
     print(f"✅ Logged in as {TARGET_ACCOUNT}")
     return client
